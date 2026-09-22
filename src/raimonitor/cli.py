@@ -9,6 +9,8 @@ and re-run independently::
     raimonitor report  --metrics metrics.json --incidents incidents.jsonl --out report.html
     raimonitor run     --input decisions.csv --format decision_log --window 7D \\
                        --rules rules.json --out-dir out/
+    raimonitor serve   --input decisions.jsonl --rules rules.json \\
+                       --state-dir state/ --port 8080
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -24,6 +27,18 @@ from .incidents import append_incidents, load_incidents
 from .ingest import ingest, read_events, write_events
 from .metrics import compute_metrics
 from .report import load_json, write_report
+from .server import LiveMonitor, LiveServer
+
+
+def _add_evidence_flags(p) -> None:
+    p.add_argument("--min-group-n", type=int, default=1,
+                   help="group values with fewer events are flagged as "
+                        "insufficient evidence (default: 1, no guard)")
+    p.add_argument("--bootstrap", type=int, default=0, metavar="REPS",
+                   help="bootstrap reps for 95%% CIs on windowed rates "
+                        "(default: 0, off)")
+    p.add_argument("--bootstrap-seed", type=int, default=0,
+                   help="seed for deterministic bootstrap CIs")
 
 
 def _cmd_ingest(args) -> int:
@@ -36,7 +51,10 @@ def _cmd_ingest(args) -> int:
 def _cmd_metrics(args) -> int:
     events = read_events(args.events)
     doc = compute_metrics(events, window=args.window,
-                          positive_label=args.positive_label)
+                          positive_label=args.positive_label,
+                          min_group_n=args.min_group_n,
+                          bootstrap_reps=args.bootstrap,
+                          bootstrap_seed=args.bootstrap_seed)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     print(f"computed {len(doc['windows'])} window(s) -> {args.out}")
@@ -76,7 +94,10 @@ def _cmd_run(args) -> int:
     print(f"[1/4] ingested {len(events)} events")
 
     doc = compute_metrics(events, window=args.window,
-                          positive_label=args.positive_label)
+                          positive_label=args.positive_label,
+                          min_group_n=args.min_group_n,
+                          bootstrap_reps=args.bootstrap,
+                          bootstrap_seed=args.bootstrap_seed)
     metrics_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     print(f"[2/4] computed {len(doc['windows'])} window(s)")
 
@@ -90,6 +111,30 @@ def _cmd_run(args) -> int:
 
     write_report(doc, load_incidents(incidents_path), report_path)
     print(f"[4/4] dashboard -> {report_path}")
+    return 0
+
+
+def _cmd_serve(args) -> int:
+    monitor = LiveMonitor(
+        args.input, args.rules, args.state_dir, format=args.format,
+        window=args.window, positive_label=args.positive_label,
+        min_group_n=args.min_group_n, bootstrap_reps=args.bootstrap,
+        bootstrap_seed=args.bootstrap_seed, title=args.title)
+    server = LiveServer(monitor, host=args.host, port=args.port,
+                        poll_interval=args.interval,
+                        refresh_seconds=max(1, int(args.interval)))
+    server.start()
+    print(f"raimonitor live dashboard: {server.url}")
+    print(f"watching {args.input} (poll every {args.interval}s); "
+          f"state in {args.state_dir}")
+    print("API: /api/metrics /api/incidents /api/status — Ctrl+C to stop")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop()
     return 0
 
 
@@ -114,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--window", default="7D")
     p.add_argument("--positive-label", default="1")
     p.add_argument("--out", required=True)
+    _add_evidence_flags(p)
     p.set_defaults(func=_cmd_metrics)
 
     p = sub.add_parser("alerts", help="evaluate alerting rules into the incident log")
@@ -137,7 +183,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--positive-label", default="1")
     p.add_argument("--rules", required=True)
     p.add_argument("--out-dir", required=True)
+    _add_evidence_flags(p)
     p.set_defaults(func=_cmd_run)
+
+    p = sub.add_parser("serve", help="live dashboard: tail a decision log, "
+                                     "recompute windows, serve auto-refreshing UI")
+    p.add_argument("--input", required=True,
+                   help="watched decision-log file (.jsonl or line-oriented .csv)")
+    p.add_argument("--format", default="decision_log",
+                   choices=["decision_log"])
+    p.add_argument("--rules", required=True, help="alert rules JSON")
+    p.add_argument("--state-dir", required=True,
+                   help="watermark + accumulated events + incident log")
+    p.add_argument("--window", default="7D")
+    p.add_argument("--positive-label", default="1")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--interval", type=float, default=5.0,
+                   help="seconds between log polls (also the page refresh)")
+    p.add_argument("--title", default="Responsible AI monitoring — live")
+    _add_evidence_flags(p)
+    p.set_defaults(func=_cmd_serve)
     return parser
 
 

@@ -46,8 +46,14 @@ function of events, alerts a pure function of metrics.
 size), so bucketing is deterministic regardless of run time.
 
 **metrics.py** — per window and system. DIR = min(group rate)/max(group
-rate); `None` when fewer than two groups or the max rate is 0. Error-rate
-gaps use only events with outcomes. Undefined values stay `None`.
+rate); `None` when fewer than two groups have sufficient evidence or the
+max rate is 0. Error-rate gaps use only events with outcomes. Undefined
+values stay `None`. `min_group_n` flags small group values as
+`insufficient_evidence` (rates become `None`, excluded from DIR/gaps);
+`bootstrap_reps`/`bootstrap_seed` attach 95% bootstrap CIs to decision
+rates and per-group TPR/FPR. CIs use a per-(window, system) seeded RNG
+(`evidence.window_rng`), so results are identical whether computed in one
+batch or incrementally by the live server.
 
 **drift.py** — PSI between baseline and current windows for the decision
 distribution and each numeric feature (decile bins from the baseline, so bin
@@ -61,7 +67,28 @@ edges can't move with the data). Interpretation: <0.1 no significant shift,
 **incidents.py** — append-only JSONL; `acknowledge` flips status in place.
 
 **report.py** — one self-contained HTML file; charts are matplotlib PNGs
-embedded as base64 (requires the `report` extra).
+embedded as base64 (requires the `report` extra). Session 2 added
+cross-system comparison: DIR / TPR-gap / FPR-gap time-series with one line
+per system, per-group decision-rate time-series per (attribute, value),
+a cross-system latest-window comparison table, per-system latest-window
+sections with bootstrap CIs and insufficient-evidence markers in the
+group tables. `build_report(..., refresh_seconds=N)` adds a meta-refresh
+tag for the live dashboard.
+
+**evidence.py** — the evidence-quality guards: `min_group_n` (small
+groups get `insufficient_evidence` flags and `None` rates, excluded from
+DIR/gaps/alerts) and bootstrap 95% CIs on windowed rates with a
+deterministic per-(window, system) seeded RNG.
+
+**server.py** — live monitoring: `LiveMonitor` tails the watched
+decision-log file (byte-offset watermark in `state.json`, rotation and
+in-place-rewrite detection), ingests new rows, recomputes only the touched
+windows, re-evaluates rules from the (live-reloadable) rules file, and
+persists events + incidents. `LiveServer` serves the auto-refreshing
+dashboard at `/` and a JSON API (`/api/metrics`, `/api/incidents`,
+`/api/status`) on stdlib `ThreadingHTTPServer` — no extra dependencies.
+Restarts resume from the watermark; incident ids are deterministic, so no
+duplicates.
 
 ## Alerting logic
 
@@ -71,22 +98,26 @@ This suppresses single-window noise at the cost of N−1 windows of delay —
 the documented trade-off. Severity (`warning`/`critical`) is a label for
 triage, not an automated action.
 
-## Limitations (session 1)
+## Limitations (session 2)
 
-- Batch-oriented: no streaming ingestion, no live server, no auth.
-- Drift compares two windows, not full history; no seasonal decomposition.
+- No auth on the live server — bind to localhost or put it behind a
+  reverse proxy. No TLS.
+- Drift still compares two windows, not full history; no seasonal decomposition.
 - Notifications are log-only (no email/Slack/webhook).
 - Intersectional groups must be pre-combined upstream (e.g. `group_sex_race`).
 - PSI bins need ≥10 baseline observations per feature, else the feature is skipped.
-- Small groups: no minimum-n guard in session 1 — noisy rates on tiny groups
-  are the operator's to interpret (a `--min-group-n` is roadmap).
+- CSV watch files must be line-oriented (no embedded newlines in quoted
+  fields); JSONL is recommended for streaming.
+- Bootstrap CIs are resampling-based and cost CPU proportional to
+  reps × window size; tune `--bootstrap` for very large windows.
 
 ## Roadmap (future sessions)
 
-1. Live dashboard server with streaming ingestion (watch a directory / tail a log).
-2. Cross-system comparison views and per-group time-series beyond DIR.
-3. `--min-group-n` guard and confidence intervals on windowed rates.
+1. ~~Live dashboard server with streaming ingestion (watch a directory / tail a log).~~ — done in session 2
+2. ~~Cross-system comparison views and per-group time-series beyond DIR.~~ — done in session 2
+3. ~~`--min-group-n` guard and confidence intervals on windowed rates.~~ — done in session 2
 4. Notification delivery (email, Slack webhook) for critical incidents.
 5. Full-history drift (CUSUM / change-point detection) and seasonality handling.
 6. Signed incident log entries (hash-chained, like opsaudit's sign-off chain).
 7. Scheduled runs (cron/CI) with stateful last-window watermark.
+8. Authentication / TLS termination guidance for the live server.

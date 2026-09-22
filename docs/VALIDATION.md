@@ -67,3 +67,50 @@ new TPR-gap signal). The full dashboard for this run renders at
   would exercise the PSI path more than the threshold rules.
 - The predictor is a fixed rule, so "model" behavior is fully known — a
   learned model would add its own dynamics.
+
+---
+
+# Session 2 — evidence guards and live-server parity (2026-09-22)
+
+Same dataset, feed, and policy change as above. The script now runs two
+additional phases (see `run_guards_and_live_server` in
+`examples/adult_validation.py`).
+
+## Phase 1 — evidence guards (`--min-group-n 100 --bootstrap 100 --bootstrap-seed 42`)
+
+**Observed:**
+
+- Flagged as insufficient evidence (rates reported as `None`, excluded
+  from DIR): `race=Amer-Indian-Eskimo` in all 9 windows,
+  `race=Other` in all 9 windows, `race=Asian-Pac-Islander` in 2 windows —
+  exactly the small groups in a 3,500-event week.
+- Example CI: window 2026-01-01, `sex=Male` decision rate **0.226**,
+  95% CI **(0.212, 0.242)** (100 reps, seed 42).
+- Incidents with guards: **10** — identical to the unguarded run. The
+  guards suppress noisy rates on tiny groups without changing rule
+  outcomes on groups with sufficient evidence.
+
+## Phase 2 — live-server parity
+
+`raimonitor serve --port 18080 --interval 1` tailed the same
+`decisions.csv` (30,000 events) with the same guard settings.
+
+**Observed:**
+
+- Server consumed all **30,000** events.
+- `GET /api/metrics` **byte-identical to the batch `metrics.json`** —
+  streaming ingestion reproduces the batch pipeline exactly (this holds
+  because bootstrap CIs use per-(window, system) seeded RNGs, so results
+  do not depend on processing order).
+- Live incidents: **10**, matching the batch run.
+- Server restart with the same state dir: events still 30,000, incidents
+  still 10 — **no duplicates**, the watermark resume works.
+
+## Limitations of the session-2 validation
+
+- The live-server test streams a static file rather than a truly live
+  producer; it validates tailing/parity/restart, not backpressure under
+  high event rates.
+- Bootstrap CIs on 3,500-event windows cost ~10 s per full run at 100
+  reps — acceptable for monitoring windows, but the rep count should be
+  tuned for very large windows.

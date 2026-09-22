@@ -18,6 +18,41 @@ raimonitor run --input examples/sample_decisions.csv --format decision_log \
 
 This ingests 840 decisions, computes weekly fairness metrics, evaluates the alert rules, and writes `out/report.html` — a dashboard with DIR time-series, per-group breakdowns, and the incident list. The sample data contains an injected policy drift on day 15; the pipeline raises a `dir-below-80` incident for it.
 
+### Live monitoring
+
+```bash
+# Terminal 1: start the live server (tails decisions.jsonl, serves the dashboard)
+raimonitor serve --input decisions.jsonl --rules examples/sample_rules.json \
+  --state-dir live_state/ --port 8080 --interval 5
+
+# Terminal 2: append decisions as they happen — the dashboard updates live
+cat new_decisions.jsonl >> decisions.jsonl
+```
+
+Open http://127.0.0.1:8080 — the page auto-refreshes. JSON API:
+`/api/metrics`, `/api/incidents`, `/api/status`. The server keeps a
+byte-offset watermark in `live_state/state.json`, so restarts resume where
+they left off without duplicating incidents (incident ids are
+deterministic). The rules file is re-read on every poll, so thresholds can
+be tuned without restarting.
+
+### Evidence-quality guards
+
+```bash
+raimonitor run --input decisions.csv --format decision_log --window 7D \
+  --rules rules.json --out-dir out/ \
+  --min-group-n 50 --bootstrap 200 --bootstrap-seed 42
+```
+
+- `--min-group-n`: group values with fewer events are flagged
+  **insufficient evidence** — their rates are reported as `None`, excluded
+  from DIR/gap computations, and can never trip an alert rule. No more
+  noisy rates on tiny groups.
+- `--bootstrap N`: attaches 95% bootstrap confidence intervals to
+  windowed decision rates and per-group TPR/FPR (deterministic for a
+  fixed `--bootstrap-seed`; the CIs are identical in batch and live-server
+  runs because each (window, system) pair gets its own seeded RNG).
+
 Or run the stages separately:
 
 ```bash
@@ -50,23 +85,23 @@ Metrics: `dir`, `tpr_gap`, `fpr_gap`, `decision_rate`, `accuracy`, `volume`. A r
 
 ## Real-world validation
 
-`examples/adult_validation.py` streams the [UCI Adult](https://archive.ics.uci.edu/dataset/2/adult) census dataset (retrieved 2026-09-22) as a 60-day simulated production feed with an injected day-41 policy change. Observed: baseline DIR(sex) 0.65–0.71 already trips the 0.8 rule (true positive on real data); after the policy change DIR collapses to 0.08–0.13 and the TPR-gap rule fires. Full methodology and numbers: `docs/VALIDATION.md`.
+`examples/adult_validation.py` streams the [UCI Adult](https://archive.ics.uci.edu/dataset/2/adult) census dataset (retrieved 2026-09-22) as a 60-day simulated production feed with an injected day-41 policy change. Observed: baseline DIR(sex) 0.65–0.71 already trips the 0.8 rule (true positive on real data); after the policy change DIR collapses to 0.08–0.13 and the TPR-gap rule fires. Session 2 extends it: `--min-group-n 100` flags the small race groups as insufficient evidence (9/9 windows for Amer-Indian-Eskimo and Other, 2 for Asian-Pacific-Islander) with identical incident counts, and `raimonitor serve` reproduces the batch metrics byte-for-byte over 30,000 streamed events, with no duplicate incidents after restart. Full methodology and numbers: `docs/VALIDATION.md`.
 
 ## Project layout
 
-- `src/raimonitor/` — the package (`schema`, `ingest`, `windows`, `metrics`, `drift`, `alerts`, `incidents`, `report`, `cli`)
-- `tests/` — 38 tests, all deterministic
+- `src/raimonitor/` — the package (`schema`, `ingest`, `windows`, `metrics`, `drift`, `alerts`, `incidents`, `report`, `evidence`, `server`, `cli`)
+- `tests/` — 65 tests, all deterministic
 - `docs/ARCHITECTURE.md` — component design, alerting logic, limitations
 - `docs/VALIDATION.md` — real-data validation methodology and results
 - `examples/` — sample data, rules, and the Adult validation script
 
-## Limitations (session 1)
+## Limitations (session 2)
 
-- Static HTML report only — no live server, no streaming ingestion, no auth.
-- Metrics are computed per system; cross-system comparison views are not built yet.
+- Live server has no auth — bind to localhost or put it behind a reverse proxy.
 - Drift detection compares two windows (baseline vs current), not full history.
 - Incident notifications are log-only — no email/Slack/webhook delivery.
 - Group attributes are treated as categorical; intersectional groups must be pre-combined upstream.
+- CSV watch files must be line-oriented (no embedded newlines); JSONL is recommended for streaming.
 
 See `docs/ARCHITECTURE.md` for the roadmap. Metrics are signals for human review, not verdicts.
 

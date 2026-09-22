@@ -142,7 +142,130 @@ def main() -> int:
         print(f"  {inc['id']} {inc['rule']} window={inc['window_start'][:10]} "
               f"observed={inc['observed']:.3f} severity={inc['severity']}")
     print(f"\ndashboard: {OUT / 'pipeline' / 'report.html'}")
+
+    # Phase 2 (session 2): evidence guards + live-server parity.
+    run_guards_and_live_server(log_path)
     return 0
+
+
+def run_guards_and_live_server(log_path: Path) -> None:
+    """Session-2 validation: min_group_n + bootstrap CIs, and the live server.
+
+    1. Guards run: batch pipeline with --min-group-n 100 --bootstrap 100.
+       Small race groups in a 3,500-event week must be flagged as
+       insufficient evidence instead of producing noisy rates.
+    2. Live server: `raimonitor serve` tails the same decisions.csv; its
+       /api/metrics must equal the batch metrics document (deterministic
+       parity), and a server restart must not duplicate incidents.
+    """
+    import time
+    import urllib.request
+
+    print("\n=== session-2: evidence guards (min_group_n=100, bootstrap=100) ===")
+    guards_rules = OUT / "rules_guards.json"
+    guards_rules.write_text((OUT / "rules.json").read_text(), encoding="utf-8")
+    guards_dir = OUT / "pipeline_guards"
+    subprocess.run(
+        [sys.executable, "-m", "raimonitor.cli", "run",
+         "--input", str(log_path), "--format", "decision_log",
+         "--window", "7D", "--rules", str(guards_rules),
+         "--min-group-n", "100", "--bootstrap", "100",
+         "--bootstrap-seed", "42",
+         "--out-dir", str(guards_dir)],
+        check=True,
+    )
+    metrics = json.loads((guards_dir / "metrics.json").read_text())
+    flagged: dict[str, int] = {}
+    for w in metrics["windows"]:
+        for attr, ginfo in w["groups"].items():
+            for value, info in ginfo["values"].items():
+                if info.get("insufficient_evidence"):
+                    flagged[f"{attr}={value}"] = flagged.get(f"{attr}={value}", 0) + 1
+    print(f"group values flagged insufficient evidence: {flagged}")
+    print(f"settings recorded: min_group_n={metrics['min_group_n']}, "
+          f"bootstrap_reps={metrics['bootstrap_reps']}")
+    w0 = metrics["windows"][0]
+    male = w0["groups"]["sex"]["values"]["Male"]
+    print(f"example CI — window {w0['window_start'][:10]} sex=Male decision "
+          f"rate {male['decision_rate']:.3f} CI "
+          f"({male['decision_rate_ci'][0]:.3f}, {male['decision_rate_ci'][1]:.3f})")
+    incidents = [json.loads(line) for line in
+                 (guards_dir / "incidents.jsonl").read_text(encoding="utf-8")
+                 .splitlines()]
+    print(f"incidents with guards: {len(incidents)} "
+          f"(guards must not change rule outcomes on sufficient evidence)")
+
+    print("\n=== session-2: live server parity ===")
+    port = 18080
+    state_dir = OUT / "live_state"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "raimonitor.cli", "serve",
+         "--input", str(log_path), "--rules", str(guards_rules),
+         "--state-dir", str(state_dir), "--window", "7D",
+         "--min-group-n", "100", "--bootstrap", "100",
+         "--bootstrap-seed", "42",
+         "--port", str(port), "--interval", "1",
+         "--title", "adult live validation"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        def api(path):
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}",
+                                        timeout=10) as resp:
+                return json.loads(resp.read())
+
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                if api("/api/status")["events"] >= 30000:
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        status = api("/api/status")
+        print(f"live server consumed events: {status['events']}")
+        assert status["events"] == 30000, "server did not consume the full log"
+        live_metrics = api("/api/metrics")
+        batch_metrics = json.loads((guards_dir / "metrics.json").read_text())
+        assert live_metrics == batch_metrics, \
+            "live-server metrics differ from the batch pipeline"
+        print("live /api/metrics == batch metrics.json: PARITY OK")
+        live_incidents = api("/api/incidents")
+        print(f"live incidents: {len(live_incidents)} "
+              f"(batch: {len(incidents)})")
+        assert len(live_incidents) == len(incidents)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=15)
+
+    # Restart with the same state dir: no duplicate events, no dup incidents.
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "raimonitor.cli", "serve",
+         "--input", str(log_path), "--rules", str(guards_rules),
+         "--state-dir", str(state_dir), "--window", "7D",
+         "--min-group-n", "100", "--bootstrap", "100",
+         "--bootstrap-seed", "42",
+         "--port", str(port), "--interval", "1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                if api("/api/status")["events"] >= 30000:
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        status = api("/api/status")
+        assert status["events"] == 30000, "restart lost events"
+        assert status["incidents"] == len(incidents), \
+            "restart duplicated or lost incidents"
+        print(f"restart: events={status['events']}, "
+              f"incidents={status['incidents']} — NO DUPLICATES OK")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=15)
 
 
 if __name__ == "__main__":

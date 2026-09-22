@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0 — 2026-09-22 (session 2)
+
+- **Live dashboard server** (`raimonitor serve`): tails a decision-log
+  file (JSONL or line-oriented CSV), recomputes only the touched windows,
+  re-evaluates rules (rules file is live-reloaded), and serves an
+  auto-refreshing dashboard plus a JSON API
+  (`/api/metrics`, `/api/incidents`, `/api/status`) on stdlib
+  `ThreadingHTTPServer` — zero new dependencies. Byte-offset watermark in
+  `state.json` survives restarts; rotation/rewrite detection; deterministic
+  incident ids mean restarts never duplicate incidents.
+- **Cross-system comparison views**: DIR / TPR-gap / FPR-gap time-series
+  with one line per system, per-group decision-rate time-series per
+  (attribute, value), a cross-system latest-window comparison table, and
+  per-system latest-window sections — in both the static report and the
+  live dashboard.
+- **Evidence-quality guards**: `--min-group-n` flags small group values as
+  insufficient evidence (rates become explicit `None`, excluded from DIR,
+  gaps, and alert rules); `--bootstrap N --bootstrap-seed S` attaches
+  deterministic 95% bootstrap CIs to windowed decision rates and per-group
+  TPR/FPR. CIs use per-(window, system) seeded RNGs, so batch and
+  live-server runs produce identical numbers.
+- Real-world validation extended: guards flag exactly the small race
+  groups in the Adult feed with incident counts unchanged (10); the live
+  server reproduces the batch metrics document byte-for-byte over 30,000
+  streamed events and a restart produces no duplicate incidents.
+  See `docs/VALIDATION.md`.
+- Tests: 65/65 passing (38 session-1 + 27 new).
+
 ## 0.1.0 — 2026-09-22 (session 1)
 
 Initial build:
