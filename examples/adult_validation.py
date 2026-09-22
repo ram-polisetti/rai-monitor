@@ -26,6 +26,12 @@ last two windows (observed gaps 0.361, 0.382). The dashboard catches both
 the standing disparity and the deployment regression.
 
 Run: python3 examples/adult_validation.py  (writes to examples/adult_out/)
+
+Session 3: CUSUM over the DIR(sex) history localizes the day-41 policy
+change to the 2026-02-05 window (first window containing day 41:
+1 change point, direction=down, value 0.549 vs previous 0.686), and
+`raimonitor verify-log` confirms the 10 batch incidents as an intact
+SHA-256 hash chain (10 signed, 0 legacy, 0 errors).
 """
 
 from __future__ import annotations
@@ -145,6 +151,9 @@ def main() -> int:
 
     # Phase 2 (session 2): evidence guards + live-server parity.
     run_guards_and_live_server(log_path)
+
+    # Phase 3 (session 3): full-history drift + tamper-evident incident log.
+    run_session3_checks(log_path)
     return 0
 
 
@@ -266,6 +275,54 @@ def run_guards_and_live_server(log_path: Path) -> None:
     finally:
         proc.terminate()
         proc.wait(timeout=15)
+
+
+def run_session3_checks(log_path: Path) -> None:
+    """Session-3 validation: CUSUM change-point detection + signed incidents.
+
+    1. CUSUM over the DIR(sex) history from the batch metrics document must
+       localize the day-41 policy change to the window containing day 41
+       (2026-02-05..2026-02-12), i.e. window_start 2026-02-05.
+    2. The batch incident log must verify as an intact hash chain
+       (`raimonitor verify-log` exits 0).
+    Both results are printed as exact observed values.
+    """
+    print("\n=== session-3: CUSUM change-point detection ===")
+    subprocess.run(
+        [sys.executable, "-m", "raimonitor.cli", "drift",
+         "--metrics", str(OUT / "pipeline" / "metrics.json"),
+         "--metric", "dir", "--group-attr", "sex"],
+        check=True,
+    )
+    from raimonitor.drift import detect_change_points
+    metrics = json.loads((OUT / "pipeline" / "metrics.json").read_text())
+    result = detect_change_points(metrics["windows"], "dir", group_attr="sex")
+    cps = result["change_points"]
+    assert cps, "CUSUM found no change point in the Adult DIR history"
+    first = cps[0]
+    print(f"change points found: {len(cps)}")
+    print(f"first change point: window_start={first['window_start'][:10]} "
+          f"direction={first['direction']} value={first['value']:.3f} "
+          f"previous={first['previous_value']:.3f}")
+    # Day 41 of the feed is 2026-02-10, inside the 7-day window starting
+    # 2026-02-05: the first change point must be that window.
+    assert first["window_start"][:10] == "2026-02-05", \
+        f"expected the day-41 policy change at window 2026-02-05, got {first['window_start'][:10]}"
+    assert first["direction"] == "down"
+    print("CUSUM localized the day-41 policy change: OK")
+
+    print("\n=== session-3: tamper-evident incident log ===")
+    proc = subprocess.run(
+        [sys.executable, "-m", "raimonitor.cli", "verify-log",
+         "--incidents", str(OUT / "pipeline" / "incidents.jsonl")],
+    )
+    assert proc.returncode == 0, "incident log hash chain is broken"
+    from raimonitor.incidents import verify_log
+    check = verify_log(OUT / "pipeline" / "incidents.jsonl")
+    print(f"hash chain intact: {check['signed']} signed records, "
+          f"{check['legacy_unsigned']} legacy unsigned, "
+          f"errors={check['errors']}")
+    print("verify-log: OK")
 
 
 if __name__ == "__main__":

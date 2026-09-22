@@ -68,6 +68,26 @@ def test_validate_rule_rejects_bad_input():
         validate_rule({**RULE, "op": "near"})
 
 
+def test_validate_rule_rejects_non_numeric_threshold():
+    # A string threshold used to blow up with a TypeError inside the OPS
+    # lambda at evaluation time; it must fail fast in validate_rule.
+    for bad in ("0.8", None, [0.8], True):
+        with pytest.raises(ValueError, match="threshold"):
+            validate_rule({**RULE, "threshold": bad})
+    # ints are legitimate numeric thresholds
+    assert validate_rule({**RULE, "threshold": 1})["threshold"] == 1
+
+
+def test_validate_rule_rejects_non_integer_persistence():
+    # int() coercion used to silently truncate 2.7 -> 2; now rejected.
+    for bad in (2.7, "2", 2.0, True, None):
+        with pytest.raises(ValueError, match="persistence"):
+            validate_rule({**RULE, "persistence": bad})
+    assert validate_rule({**RULE, "persistence": 3})["persistence"] == 3
+    with pytest.raises(ValueError, match="persistence"):
+        validate_rule({**RULE, "persistence": 0})
+
+
 def test_incident_log_dedupes_and_acknowledges(tmp_path):
     log = tmp_path / "incidents.jsonl"
     incidents = evaluate_rules(_windows([0.7, 0.6]), [RULE])

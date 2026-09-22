@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import io
 import json
 import threading
@@ -289,12 +290,38 @@ class LiveMonitor:
         }
 
 
-def make_handler(monitor: LiveMonitor, refresh_seconds: int = 5):
-    """Build an HTTP request handler class bound to ``monitor``."""
+def make_handler(monitor: LiveMonitor, refresh_seconds: int = 5,
+                 auth_token: str | None = None):
+    """Build an HTTP request handler class bound to ``monitor``.
+
+    When ``auth_token`` is set, every route requires
+    ``Authorization: Bearer <token>`` and answers 401 otherwise. The token
+    is compared with :func:`hmac.compare_digest`. Auth is off by default —
+    the server is meant to bind to localhost; enable a token whenever the
+    dashboard is exposed beyond loopback (see the auth threat model in the
+    README).
+    """
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # keep the server quiet
             pass
+
+        def _unauthorized(self) -> None:
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Content-Type", "text/plain")
+            body = b"unauthorized: valid bearer token required"
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authorized(self) -> bool:
+            if not auth_token:
+                return True
+            header = self.headers.get("Authorization", "")
+            scheme, _, presented = header.partition(" ")
+            return (scheme.lower() == "bearer" and presented
+                    and hmac.compare_digest(presented, auth_token))
 
         def _send(self, body: bytes, content_type: str) -> None:
             self.send_response(200)
@@ -304,6 +331,9 @@ def make_handler(monitor: LiveMonitor, refresh_seconds: int = 5):
             self.wfile.write(body)
 
         def do_GET(self) -> None:
+            if not self._authorized():
+                self._unauthorized()
+                return
             snap = monitor.snapshot()
             if self.path in ("/", "/index.html"):
                 html = build_report(
@@ -331,13 +361,15 @@ class LiveServer:
 
     def __init__(self, monitor: LiveMonitor, host: str = "127.0.0.1",
                  port: int = 8080, poll_interval: float = 5.0,
-                 refresh_seconds: int = 5):
+                 refresh_seconds: int = 5,
+                 auth_token: str | None = None):
         self.monitor = monitor
         self.host = host
         self.port = port
         self.poll_interval = poll_interval
+        self.auth_token = auth_token
         self._httpd = ThreadingHTTPServer(
-            (host, port), make_handler(monitor, refresh_seconds))
+            (host, port), make_handler(monitor, refresh_seconds, auth_token))
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 

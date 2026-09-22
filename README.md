@@ -62,6 +62,70 @@ raimonitor alerts  --metrics metrics.json --rules rules.json --incidents inciden
 raimonitor report  --metrics metrics.json --incidents incidents.jsonl --out report.html
 ```
 
+### Notifications
+
+```bash
+raimonitor notify --incidents incidents.jsonl --config notify.json --dry-run
+raimonitor notify --incidents incidents.jsonl --config notify.json \
+  --state notified.json   # skip incidents already sent on re-runs
+```
+
+`notify.json` enables email (stdlib SMTP) and/or Slack incoming webhooks,
+each with a minimum severity. Delivery is **opt-in and off by default**;
+secrets come from environment variables and are never logged. A failing
+channel never blocks the others.
+
+### Full-history drift (CUSUM change-point detection)
+
+```bash
+raimonitor drift --metrics metrics.json --metric dir --group-attr sex
+raimonitor drift --metrics metrics.json --metric volume --deseasonalize-dow
+```
+
+Two-sided tabular CUSUM walks the whole metric history and reports the
+first window of each new regime (re-baselining after each alarm, so a
+sustained shift alarms once). `--deseasonalize-dow` strips the weekly
+rhythm first, so a weekend dip doesn't read as a regime change.
+
+### Tamper-evident incident log
+
+Every incident record carries a SHA-256 hash chain (`prev_hash` →
+`record_hash`). Verify it any time:
+
+```bash
+raimonitor verify-log --incidents incidents.jsonl   # exits 0 if intact
+```
+
+Tampering (edited field, reordered or deleted records) breaks the chain
+and fails verification. Legacy unsigned records from earlier sessions
+stay readable and are reported separately.
+
+### Scheduled runs
+
+```bash
+# crontab: 0 * * * * raimonitor schedule --input decisions.jsonl \
+#   --rules rules.json --state-dir live_state/ --out-dir hourly_out/
+raimonitor schedule --input decisions.jsonl --rules rules.json \
+  --state-dir live_state/ --out-dir hourly_out/
+```
+
+A cron-friendly one-shot run: reuses the live server's state dir
+(byte-offset watermark, incremental window recompute) and refreshes
+`metrics.json` + `report.html`. Deterministic incident ids mean re-runs
+never duplicate incidents.
+
+### Securing the live server
+
+```bash
+raimonitor serve --input decisions.jsonl --rules rules.json \
+  --state-dir live_state/ --port 8080 --auth-token-env RAIMONITOR_TOKEN
+```
+
+A bearer token then protects the dashboard and every API route
+(401 + `WWW-Authenticate: Bearer` without it). Without a token the server
+prints a warning — add TLS via a reverse proxy for anything beyond
+localhost.
+
 ## Input formats
 
 | `--format`      | Input | Notes |
@@ -85,23 +149,26 @@ Metrics: `dir`, `tpr_gap`, `fpr_gap`, `decision_rate`, `accuracy`, `volume`. A r
 
 ## Real-world validation
 
-`examples/adult_validation.py` streams the [UCI Adult](https://archive.ics.uci.edu/dataset/2/adult) census dataset (retrieved 2026-09-22) as a 60-day simulated production feed with an injected day-41 policy change. Observed: baseline DIR(sex) 0.65–0.71 already trips the 0.8 rule (true positive on real data); after the policy change DIR collapses to 0.08–0.13 and the TPR-gap rule fires. Session 2 extends it: `--min-group-n 100` flags the small race groups as insufficient evidence (9/9 windows for Amer-Indian-Eskimo and Other, 2 for Asian-Pacific-Islander) with identical incident counts, and `raimonitor serve` reproduces the batch metrics byte-for-byte over 30,000 streamed events, with no duplicate incidents after restart. Full methodology and numbers: `docs/VALIDATION.md`.
+`examples/adult_validation.py` streams the [UCI Adult](https://archive.ics.uci.edu/dataset/2/adult) census dataset (retrieved 2026-09-22) as a 60-day simulated production feed with an injected day-41 policy change. Observed: baseline DIR(sex) 0.65–0.71 already trips the 0.8 rule (true positive on real data); after the policy change DIR collapses to 0.08–0.13 and the TPR-gap rule fires. Session 2 extends it: `--min-group-n 100` flags the small race groups as insufficient evidence (9/9 windows for Amer-Indian-Eskimo and Other, 2 for Asian-Pacific-Islander) with identical incident counts, and `raimonitor serve` reproduces the batch metrics byte-for-byte over 30,000 streamed events, with no duplicate incidents after restart. Session 3: CUSUM over the DIR(sex) history localizes the day-41 policy change to the 2026-02-05 window (the first window containing day 41), and `verify-log` confirms the batch incident log as an intact hash chain. Full methodology and numbers: `docs/VALIDATION.md`.
 
 ## Project layout
 
-- `src/raimonitor/` — the package (`schema`, `ingest`, `windows`, `metrics`, `drift`, `alerts`, `incidents`, `report`, `evidence`, `server`, `cli`)
-- `tests/` — 65 tests, all deterministic
+- `src/raimonitor/` — the package (`schema`, `ingest`, `windows`, `metrics`, `drift`, `alerts`, `incidents`, `report`, `evidence`, `server`, `notifications`, `cli`)
+- `tests/` — 102 tests, all deterministic
 - `docs/ARCHITECTURE.md` — component design, alerting logic, limitations
 - `docs/VALIDATION.md` — real-data validation methodology and results
 - `examples/` — sample data, rules, and the Adult validation script
 
-## Limitations (session 2)
+## Limitations (session 3)
 
-- Live server has no auth — bind to localhost or put it behind a reverse proxy.
-- Drift detection compares two windows (baseline vs current), not full history.
-- Incident notifications are log-only — no email/Slack/webhook delivery.
+- Live server has no TLS — the bearer token protects the routes, but put
+  it behind a reverse proxy for anything beyond localhost.
 - Group attributes are treated as categorical; intersectional groups must be pre-combined upstream.
 - CSV watch files must be line-oriented (no embedded newlines); JSONL is recommended for streaming.
+- Tail truncation of the incident log is only detectable against an
+  externally stored expected record count.
+- Notifications are one-way delivery (email/Slack); no escalation chains
+  or on-call rotation integration.
 
 See `docs/ARCHITECTURE.md` for the roadmap. Metrics are signals for human review, not verdicts.
 

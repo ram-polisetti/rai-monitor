@@ -58,13 +58,41 @@ batch or incrementally by the live server.
 **drift.py** — PSI between baseline and current windows for the decision
 distribution and each numeric feature (decile bins from the baseline, so bin
 edges can't move with the data). Interpretation: <0.1 no significant shift,
-0.1–0.25 moderate, >0.25 significant. Plus raw decision-rate shift.
+0.1–0.25 moderate, >0.25 significant. Plus raw decision-rate shift. Session
+3 added full-history drift: two-sided tabular CUSUM (`cusum`,
+`detect_change_points`, `raimonitor drift`) with a Phase-I reference
+(first `max(3, n//4)` values), k=0.5, h=5.0; change points are reported as
+the first window of the new regime and the reference re-baselines after
+each alarm so a sustained shift alarms once. `dow_baseline` /
+`deseasonalize` strip day-of-week seasonality; thin weekdays fall back to
+the global mean (documented, not silent).
 
 **alerts.py** — rules name a metric, comparison, threshold, persistence
 (consecutive windows), and severity. Incident ids are
 `sha256(rule|system|window)` truncated — re-running never duplicates.
+`validate_rule` rejects unknown metrics/ops, non-numeric thresholds,
+non-integer `persistence` (bools included — no silent `int()` coercion),
+and unknown severities at config time, so bad rules fail fast instead of
+raising `TypeError` mid-evaluation.
 
-**incidents.py** — append-only JSONL; `acknowledge` flips status in place.
+**incidents.py** — append-only JSONL. Every record carries `prev_hash`
+and `record_hash` (SHA-256 over the canonical JSON of the record, chained
+to the previous record; the first points at `"GENESIS"`). `verify_log`
+re-hashes the whole chain: edited fields, reordered records, or deletions
+fail verification (`raimonitor verify-log` exits 1). Records written
+before signing (legacy) are still readable and reported as
+`legacy_unsigned`. `acknowledge` updates a record's status and re-chains
+from that record onward. Known limitation: truncating the tail of the log
+is only detectable against an externally stored expected record count —
+keep one (e.g. in your backup manifest) if that threat matters.
+
+**notifications.py** — opt-in delivery of incidents (`raimonitor notify`).
+Email via stdlib `smtplib`, Slack via incoming webhooks (`urllib`).
+Config file enables each channel with a minimum severity; secrets come
+from environment variables and are redacted from logs/errors. Dry-run
+mode renders without sending. Channels fail independently — one failing
+channel never blocks the others. The CLI keeps a notified-ID state file
+so scheduled re-runs don't resend.
 
 **report.py** — one self-contained HTML file; charts are matplotlib PNGs
 embedded as base64 (requires the `report` extra). Session 2 added
@@ -88,7 +116,13 @@ persists events + incidents. `LiveServer` serves the auto-refreshing
 dashboard at `/` and a JSON API (`/api/metrics`, `/api/incidents`,
 `/api/status`) on stdlib `ThreadingHTTPServer` — no extra dependencies.
 Restarts resume from the watermark; incident ids are deterministic, so no
-duplicates.
+duplicates. Session 3: optional bearer-token auth (`--auth-token` /
+`--auth-token-env`) guards `/` and every API route with
+`hmac.compare_digest` (401 + `WWW-Authenticate: Bearer` on failure);
+no-auth mode prints a startup warning. No TLS — terminate at a reverse
+proxy. Session 3 also added `raimonitor schedule`: a cron-friendly
+one-shot run reusing the monitor's state dir (watermark, incremental
+recompute, refreshed `metrics.json`/`report.html`).
 
 ## Alerting logic
 
@@ -98,26 +132,36 @@ This suppresses single-window noise at the cost of N−1 windows of delay —
 the documented trade-off. Severity (`warning`/`critical`) is a label for
 triage, not an automated action.
 
-## Limitations (session 2)
+## Limitations (session 3)
 
-- No auth on the live server — bind to localhost or put it behind a
-  reverse proxy. No TLS.
-- Drift still compares two windows, not full history; no seasonal decomposition.
-- Notifications are log-only (no email/Slack/webhook).
+- No TLS on the live server — bearer auth protects the routes, but
+  terminate TLS at a reverse proxy for anything beyond localhost.
 - Intersectional groups must be pre-combined upstream (e.g. `group_sex_race`).
 - PSI bins need ≥10 baseline observations per feature, else the feature is skipped.
 - CSV watch files must be line-oriented (no embedded newlines in quoted
   fields); JSONL is recommended for streaming.
 - Bootstrap CIs are resampling-based and cost CPU proportional to
   reps × window size; tune `--bootstrap` for very large windows.
+- Incident-log tail truncation needs an externally stored expected record
+  count to detect.
+- Notifications are one-way delivery; no escalation chains or on-call
+  rotation integration.
+- CUSUM needs ≥3 windows and non-zero variance; its change-point estimate
+  is the first window of the new regime, with detection lag of a few
+  windows for small shifts.
 
 ## Roadmap (future sessions)
 
 1. ~~Live dashboard server with streaming ingestion (watch a directory / tail a log).~~ — done in session 2
 2. ~~Cross-system comparison views and per-group time-series beyond DIR.~~ — done in session 2
 3. ~~`--min-group-n` guard and confidence intervals on windowed rates.~~ — done in session 2
-4. Notification delivery (email, Slack webhook) for critical incidents.
-5. Full-history drift (CUSUM / change-point detection) and seasonality handling.
-6. Signed incident log entries (hash-chained, like opsaudit's sign-off chain).
-7. Scheduled runs (cron/CI) with stateful last-window watermark.
-8. Authentication / TLS termination guidance for the live server.
+4. ~~Notification delivery (email, Slack webhook) for critical incidents.~~ — done in session 3
+5. ~~Full-history drift (CUSUM / change-point detection) and seasonality handling.~~ — done in session 3
+6. ~~Signed incident log entries (hash-chained, like opsaudit's sign-off chain).~~ — done in session 3
+7. ~~Scheduled runs (cron/CI) with stateful last-window watermark.~~ — done in session 3
+8. ~~Authentication / TLS termination guidance for the live server.~~ — done in session 3 (bearer auth; TLS via reverse proxy)
+
+Candidate next work: multi-channel escalation (PagerDuty/OpsGenie),
+on-call rotation integration, finer-grained API scopes, anomaly
+detection on incident rates, and backtesting alert rules against
+historical windows.

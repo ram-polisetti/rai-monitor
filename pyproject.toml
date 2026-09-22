@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raimonitor"
-version = "0.1.0"
+version = "0.3.0"
 description = "Responsible AI monitoring dashboard: rolling fairness metrics, drift detection, and alerting over production AI decision logs."
 readme = "README.md"
 license = { text = "Apache-2.0" }

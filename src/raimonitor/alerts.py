@@ -66,7 +66,12 @@ def validate_rule(rule: dict) -> dict:
         raise ValueError(f"metric {rule['metric']!r} requires 'group_attr'")
     if rule["op"] not in OPS:
         raise ValueError(f"unknown op {rule['op']!r}; choose from {sorted(OPS)}")
-    persistence = int(rule.get("persistence", 1))
+    threshold = rule["threshold"]
+    if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+        raise ValueError(f"'threshold' must be numeric, got {threshold!r}")
+    persistence = rule.get("persistence", 1)
+    if isinstance(persistence, bool) or not isinstance(persistence, int):
+        raise ValueError(f"'persistence' must be an integer, got {persistence!r}")
     if persistence < 1:
         raise ValueError("'persistence' must be >= 1")
     severity = rule.get("severity", "warning")

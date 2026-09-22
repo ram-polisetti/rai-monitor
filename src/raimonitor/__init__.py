@@ -21,7 +21,7 @@ from .metrics import compute_metrics
 from .server import LiveMonitor, LiveServer
 from .windows import bucketize, parse_window
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "LiveMonitor",
     "LiveServer",

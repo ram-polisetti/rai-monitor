@@ -114,3 +114,47 @@ additional phases (see `run_guards_and_live_server` in
 - Bootstrap CIs on 3,500-event windows cost ~10 s per full run at 100
   reps — acceptable for monitoring windows, but the rep count should be
   tuned for very large windows.
+
+---
+
+# Session 3 — CUSUM change-point detection and signed incident log (2026-09-22)
+
+Same dataset, feed, and policy change as above. The script now runs a
+third phase (see `run_session3_checks` in `examples/adult_validation.py`).
+
+## Phase 3a — CUSUM over the DIR(sex) history
+
+`raimonitor drift --metrics pipeline/metrics.json --metric dir
+--group-attr sex` over the 9 weekly DIR(sex) values
+(0.685, 0.646, 0.713, 0.704, 0.686, 0.549, 0.084, 0.106, 0.131).
+
+**Observed:**
+
+- Change points found: **1**.
+- First change point: `window_start=2026-02-05`, `direction=down`,
+  `value=0.549`, `previous_value=0.686`.
+- The script asserts the first change point is exactly the 2026-02-05
+  window — the first 7-day window containing day 41 of the feed
+  (2026-02-10). CUSUM localized the injected policy change to the
+  correct window, one window before the full collapse (DIR 0.08–0.13)
+  is visible.
+
+## Phase 3b — tamper-evident incident log
+
+`raimonitor verify-log --incidents pipeline/incidents.jsonl`.
+
+**Observed:**
+
+- Exit code **0**; hash chain intact: **10 signed records**,
+  0 legacy unsigned, `errors=[]`.
+- All 10 incidents raised by the batch pipeline verify as an unbroken
+  SHA-256 chain.
+
+## Limitations of the session-3 validation
+
+- The injected drift is stark (DIR 0.69 → 0.08); subtler real-world
+  drift would exercise CUSUM's sensitivity parameters (k, h) more than
+  this binary before/after.
+- Verification covers the batch-written log; a live-streamed log under
+  concurrent appends is exercised by the unit tests (watermark resume,
+  no duplicate incidents) rather than this script.
