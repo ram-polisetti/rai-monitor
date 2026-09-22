@@ -91,8 +91,10 @@ Email via stdlib `smtplib`, Slack via incoming webhooks (`urllib`).
 Config file enables each channel with a minimum severity; secrets come
 from environment variables and are redacted from logs/errors. Dry-run
 mode renders without sending. Channels fail independently — one failing
-channel never blocks the others. The CLI keeps a notified-ID state file
-so scheduled re-runs don't resend.
+channel never blocks the others. The CLI's notified-state file tracks
+per-(channel, incident) pairs, so a failed channel is retried on the next
+run instead of being marked done by a sibling channel's success (bare
+incident ids from older state files are honored as all-channels-done).
 
 **report.py** — one self-contained HTML file; charts are matplotlib PNGs
 embedded as base64 (requires the `report` extra). Session 2 added

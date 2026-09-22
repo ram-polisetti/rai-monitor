@@ -156,7 +156,8 @@ def _send_slack(incident: dict, slack_cfg: dict) -> None:
 
 
 def notify_incidents(incidents: list[dict], config: dict,
-                     dry_run: bool = False) -> list[dict]:
+                     dry_run: bool = False,
+                     already_notified: frozenset = frozenset()) -> list[dict]:
     """Deliver incidents through the configured channels.
 
     Returns one delivery record per (incident, channel) pair::
@@ -164,10 +165,14 @@ def notify_incidents(incidents: list[dict], config: dict,
         {"channel": "email", "incident": "<id>", "status": "sent",
          "to": "oncall@example.org"}            # or "dry-run" / "error"
 
-    ``status`` is ``"skipped"`` for incidents below ``min_severity``.
-    Secrets never appear in the returned records. Network errors are
-    captured per incident (``status: "error"``) rather than aborting the
-    batch — one unreachable channel must not swallow the rest.
+    ``status`` is ``"skipped"`` for incidents below ``min_severity`` and
+    ``"already-notified"`` for (channel, incident) pairs in
+    ``already_notified`` (per-channel dedupe state, so a failed channel
+    is retried on the next run instead of being marked done by a sibling
+    channel's success). Secrets never appear in the returned records.
+    Network errors are captured per incident (``status: "error"``)
+    rather than aborting the batch — one unreachable channel must not
+    swallow the rest.
     """
     min_severity = config.get("min_severity", "critical")
     channels = []
@@ -184,7 +189,9 @@ def notify_incidents(incidents: list[dict], config: dict,
             continue
         for channel in channels:
             record = {"channel": channel, "incident": incident.get("id")}
-            if dry_run:
+            if (channel, incident.get("id")) in already_notified:
+                record["status"] = "already-notified"
+            elif dry_run:
                 record["status"] = "dry-run"
                 record["subject"] = _subject(incident)
             else:

@@ -147,7 +147,7 @@ def test_notify_cli_dry_run_and_state(tmp_path):
                    "--state", str(state)])
     assert rc == 0
     notified = json.loads(state.read_text(encoding="utf-8"))
-    assert notified == ["inc-1"]
+    assert notified == ["email:inc-1", "slack:inc-1"]
     # second run: nothing new to notify
     with mock.patch("smtplib.SMTP") as smtp_cls, \
          mock.patch("urllib.request.urlopen") as urlopen2:
@@ -156,3 +156,49 @@ def test_notify_cli_dry_run_and_state(tmp_path):
     assert rc == 0
     smtp_cls.assert_not_called()
     urlopen2.assert_not_called()
+
+
+def test_notify_state_retries_failed_channel_only(tmp_path):
+    log = tmp_path / "incidents.jsonl"
+    _write_incidents_log(log)
+    cfg = tmp_path / "notify.json"
+    cfg.write_text(json.dumps(CONFIG), encoding="utf-8")
+    state = tmp_path / "notified.json"
+    # First run: email fails, slack succeeds.
+    with mock.patch("smtplib.SMTP", side_effect=OSError("conn refused")), \
+         mock.patch("urllib.request.urlopen") as urlopen:
+        response = mock.MagicMock()
+        response.status = 200
+        urlopen.return_value.__enter__.return_value = response
+        rc = main(["notify", "--incidents", str(log), "--config", str(cfg),
+                   "--state", str(state)])
+    assert rc == 1  # a channel failed
+    notified = json.loads(state.read_text(encoding="utf-8"))
+    assert notified == ["slack:inc-1"], \
+        "failed email must NOT be recorded as notified"
+    # Second run: only email is retried, slack is not resent.
+    with mock.patch("smtplib.SMTP") as smtp_cls, \
+         mock.patch("urllib.request.urlopen") as urlopen2:
+        rc = main(["notify", "--incidents", str(log), "--config", str(cfg),
+                   "--state", str(state)])
+    assert rc == 0
+    smtp_cls.assert_called_once()
+    urlopen2.assert_not_called()
+    notified = json.loads(state.read_text(encoding="utf-8"))
+    assert sorted(notified) == ["email:inc-1", "slack:inc-1"]
+
+
+def test_notify_state_legacy_bare_ids_mean_all_channels(tmp_path):
+    log = tmp_path / "incidents.jsonl"
+    _write_incidents_log(log)
+    cfg = tmp_path / "notify.json"
+    cfg.write_text(json.dumps(CONFIG), encoding="utf-8")
+    state = tmp_path / "notified.json"
+    state.write_text(json.dumps(["inc-1"]), encoding="utf-8")  # legacy format
+    with mock.patch("smtplib.SMTP") as smtp_cls, \
+         mock.patch("urllib.request.urlopen") as urlopen:
+        rc = main(["notify", "--incidents", str(log), "--config", str(cfg),
+                   "--state", str(state)])
+    assert rc == 0
+    smtp_cls.assert_not_called()
+    urlopen.assert_not_called()

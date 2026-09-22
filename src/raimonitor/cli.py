@@ -150,27 +150,41 @@ def _add_auth_flags(p) -> None:
 def _cmd_notify(args) -> int:
     incidents = load_incidents(args.incidents)
     config = load_notify_config(args.config)
+    channels = [c for c in ("email", "slack") if config.get(c)]
     state_path = Path(args.state) if args.state else None
     notified: set[str] = set()
     if state_path and state_path.exists():
         notified = set(json.loads(state_path.read_text(encoding="utf-8")))
-    pending = [i for i in incidents if i["id"] not in notified]
-    deliveries = notify_incidents(pending, config, dry_run=args.dry_run)
+    # Per-channel dedupe: a failed channel must be retried next run, not
+    # marked done by a sibling channel's success. State entries are
+    # "channel:incident_id"; bare ids are legacy entries meaning all
+    # currently-configured channels already delivered.
+    already = set()
+    for incident in incidents:
+        iid = incident["id"]
+        if iid in notified:
+            already.update((c, iid) for c in channels)
+        else:
+            already.update((c, iid) for c in channels
+                           if f"{c}:{iid}" in notified)
+    deliveries = notify_incidents(incidents, config, dry_run=args.dry_run,
+                                  already_notified=frozenset(already))
     sent = sum(1 for d in deliveries if d["status"] in ("sent", "dry-run"))
     failed = sum(1 for d in deliveries if d["status"] == "error")
     skipped = sum(1 for d in deliveries if d["status"] == "skipped")
+    dupes = sum(1 for d in deliveries if d["status"] == "already-notified")
     for d in deliveries:
         if d["status"] == "error":
             print(f"  ERROR {d['channel']}/{d['incident']}: {d['error']}")
     if not args.dry_run and state_path:
         for d in deliveries:
             if d["status"] == "sent":
-                notified.add(d["incident"])
+                notified.add(f"{d['channel']}:{d['incident']}")
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(sorted(notified), indent=2) + "\n",
                               encoding="utf-8")
-    print(f"notify: {sent} delivered, {failed} failed, {skipped} skipped "
-          f"({len(pending)} unnotified incident(s) considered)"
+    print(f"notify: {sent} delivered, {failed} failed, {skipped} skipped, "
+          f"{dupes} already-notified ({len(incidents)} incident(s) considered)"
           + (" [dry-run]" if args.dry_run else ""))
     return 1 if failed else 0
 
@@ -343,7 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", required=True,
                    help="notify config JSON (channels, min_severity)")
     p.add_argument("--state", default=None,
-                   help="notified-ids state file (re-runs skip these)")
+                   help="notified state file (per-channel; re-runs skip only delivered pairs)")
     p.add_argument("--dry-run", action="store_true",
                    help="print what would be sent without sending")
     p.set_defaults(func=_cmd_notify)
