@@ -1,0 +1,6 @@
+[
+  {"name": "dir-below-80", "metric": "dir", "group_attr": "region",
+   "op": "lt", "threshold": 0.8, "persistence": 2, "severity": "critical"},
+  {"name": "volume-drop", "metric": "volume",
+   "op": "lt", "threshold": 100, "persistence": 2, "severity": "warning"}
+]
